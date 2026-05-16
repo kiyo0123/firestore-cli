@@ -37,9 +37,8 @@ def _require_firestore():
         return firestore
     except ImportError:
         raise CliError(
-            "google-cloud-firestore がインストールされていません。\n"
-            "  pip install google-cloud-firestore\n"
-            "を実行してください。"
+            "google-cloud-firestore is not installed.\n"
+            "  pip install google-cloud-firestore"
         )
 
 
@@ -49,9 +48,8 @@ def _require_admin():
         return firestore_admin_v1
     except ImportError:
         raise CliError(
-            "google-cloud-firestore (Admin API) がインストールされていません。\n"
-            "  pip install google-cloud-firestore\n"
-            "を実行してください。"
+            "google-cloud-firestore (Admin API) is not installed.\n"
+            "  pip install google-cloud-firestore"
         )
 
 
@@ -102,10 +100,10 @@ def resolve_project(args):
             project = None
     if not project:
         raise CliError(
-            "GCP プロジェクトが未設定です。次のいずれかで指定してください:\n"
+            "No GCP project configured. Set one of the following:\n"
             "  fs config set project <PROJECT_ID>\n"
-            "  または --project <PROJECT_ID>\n"
-            "  または 環境変数 GOOGLE_CLOUD_PROJECT"
+            "  or --project <PROJECT_ID>\n"
+            "  or the GOOGLE_CLOUD_PROJECT environment variable"
         )
     return project
 
@@ -126,7 +124,7 @@ def resolve_database(args):
 def _segments(path):
     parts = [p for p in path.strip("/").split("/") if p != ""]
     if not parts:
-        raise CliError("パスが空です。例: users  または  users/alice/orders")
+        raise CliError("Path is empty. e.g. users  or  users/alice/orders")
     return parts
 
 
@@ -135,8 +133,8 @@ def resolve_collection(client, path):
     parts = _segments(path)
     if len(parts) % 2 == 0:
         raise CliError(
-            f"'{path}' は document パスです。collection パス"
-            "（segment 数が奇数。例: users, users/alice/orders）を指定してください。"
+            f"'{path}' is a document path. Provide a collection path "
+            "(odd number of segments, e.g. users, users/alice/orders)."
         )
     ref = client.collection(parts[0])
     for i in range(1, len(parts), 2):
@@ -149,9 +147,8 @@ def resolve_document(client, path):
     parts = _segments(path)
     if len(parts) % 2 == 1:
         raise CliError(
-            f"'{path}' は collection パスです。document パス"
-            "（segment 数が偶数。例: users/alice, users/alice/orders/o1）"
-            "を指定してください。"
+            f"'{path}' is a collection path. Provide a document path "
+            "(even number of segments, e.g. users/alice, users/alice/orders/o1)."
         )
     ref = client.collection(parts[0]).document(parts[1])
     for i in range(2, len(parts), 2):
@@ -175,15 +172,15 @@ def read_data(args):
             raw = args.data
     if raw is None:
         raise CliError(
-            "データが指定されていません。--data '<json>' / --data-file <path> / "
-            "--data @- (stdin) のいずれかを使ってください。"
+            "No data provided. Use one of --data '<json>' / "
+            "--data-file <path> / --data @- (stdin)."
         )
     try:
         value = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise CliError(f"--data が正しい JSON ではありません: {exc}")
+        raise CliError(f"--data is not valid JSON: {exc}")
     if not isinstance(value, dict):
-        raise CliError("--data はオブジェクト（{...}）にしてください。")
+        raise CliError("--data must be an object ({...}).")
     return value
 
 
@@ -194,7 +191,7 @@ def _print_doc(doc_id, data, as_json):
         return
     print(f"# {doc_id}")
     if not data:
-        print("  (フィールドなし)")
+        print("  (no fields)")
         return
     for key in sorted(data):
         print(f"  {key}: {json.dumps(data[key], ensure_ascii=False, default=str)}")
@@ -202,7 +199,7 @@ def _print_doc(doc_id, data, as_json):
 
 def _print_table(rows):
     if not rows:
-        print("(0 件)")
+        print("(0 items)")
         return
     cols = ["ID"] + sorted({k for _, d in rows for k in (d or {})})
     widths = {c: len(c) for c in cols}
@@ -220,7 +217,7 @@ def _print_table(rows):
     print("  ".join("-" * widths[c] for c in cols))
     for cells in table:
         print("  ".join(cells[c].ljust(widths[c]) for c in cols))
-    print(f"\n{len(rows)} 件")
+    print(f"\n{len(rows)} items")
 
 
 def _friendly(exc):
@@ -229,19 +226,20 @@ def _friendly(exc):
     msg = str(exc)
     if name in ("DefaultCredentialsError",) or "default credentials" in msg.lower():
         return CliError(
-            "GCP の認証情報が見つかりません。次のいずれかを設定してください:\n"
+            "No GCP credentials found. Set one of the following:\n"
             "  gcloud auth application-default login\n"
-            "  または 環境変数 GOOGLE_APPLICATION_CREDENTIALS=<service-account.json>"
+            "  or the GOOGLE_APPLICATION_CREDENTIALS=<service-account.json> "
+            "environment variable"
         )
     if name == "NotFound" or "404" in msg:
-        return CliError(f"対象が見つかりません (NotFound): {msg}")
+        return CliError(f"Not found (NotFound): {msg}")
     if name == "PermissionDenied" or "403" in msg:
         return CliError(
-            f"権限がありません (PermissionDenied): {msg}\n"
-            "IAM ロール（roles/datastore.user 等）を確認してください。"
+            f"Permission denied (PermissionDenied): {msg}\n"
+            "Check your IAM roles (e.g. roles/datastore.user)."
         )
     if name == "AlreadyExists" or "409" in msg:
-        return CliError(f"すでに存在します (AlreadyExists): {msg}")
+        return CliError(f"Already exists (AlreadyExists): {msg}")
     return CliError(f"{name}: {msg}")
 
 
@@ -253,19 +251,19 @@ def cmd_config_set(args):
     cfg = load_config()
     cfg[args.key] = args.value
     save_config(cfg)
-    print(f"設定しました: {args.key} = {args.value}")
-    print(f"(保存先: {CONFIG_PATH})")
+    print(f"Set: {args.key} = {args.value}")
+    print(f"(saved to: {CONFIG_PATH})")
 
 
 def cmd_config_list(args):
     cfg = load_config()
     print(f"# config ({CONFIG_PATH})")
     if not cfg:
-        print("  (未設定)")
+        print("  (not configured)")
     for k in sorted(cfg):
         print(f"  {k}: {cfg[k]}")
-    print("# 実効値")
-    print(f"  project:  {os.environ.get('GOOGLE_CLOUD_PROJECT') or cfg.get('project') or '(ADC 既定 / 未設定)'}")
+    print("# effective values")
+    print(f"  project:  {os.environ.get('GOOGLE_CLOUD_PROJECT') or cfg.get('project') or '(ADC default / not set)'}")
     print(f"  database: {os.environ.get('FIRESTORE_DATABASE') or cfg.get('database') or DEFAULT_DATABASE}")
 
 
@@ -288,7 +286,7 @@ def cmd_db_create(args):
             database=db,
             database_id=database_id,
         )
-        print(f"作成中... (database_id={database_id}, location={args.location})")
+        print(f"Creating... (database_id={database_id}, location={args.location})")
         result = op.result(timeout=300)
         print(f"Created database: {result.name}")
     except Exception as exc:  # noqa: BLE001
@@ -305,12 +303,12 @@ def cmd_db_list(args):
     except Exception as exc:  # noqa: BLE001
         raise _friendly(exc)
     if not dbs:
-        print("(database なし)")
+        print("(no databases)")
         return
     for d in dbs:
         loc = getattr(d, "location_id", "")
         print(f"  {d.name}  (location={loc})")
-    print(f"\n{len(dbs)} 件")
+    print(f"\n{len(dbs)} items")
 
 
 def cmd_db_describe(args):
@@ -349,11 +347,11 @@ def cmd_collections_list(args):
     scope = args.doc_path or "(root)"
     print(f"# collections under {scope}")
     if not ids:
-        print("  (なし)")
+        print("  (none)")
         return
     for cid in ids:
         print(f"  {cid}")
-    print(f"\n{len(ids)} 件")
+    print(f"\n{len(ids)} items")
 
 
 def cmd_collections_create(args):
@@ -367,7 +365,7 @@ def cmd_collections_create(args):
     except Exception as exc:  # noqa: BLE001
         raise _friendly(exc)
     print(f"Created {args.collection}/{args.doc_id}")
-    print("(Firestore では collection は最初の document 作成時に暗黙生成されます)")
+    print("(In Firestore, a collection is created implicitly when its first document is written)")
 
 
 # --------------------------------------------------------------------------- #
@@ -396,7 +394,7 @@ def cmd_documents_get(args):
     except Exception as exc:  # noqa: BLE001
         raise _friendly(exc)
     if not snap.exists:
-        raise CliError(f"document が存在しません: {args.doc_path}")
+        raise CliError(f"Document does not exist: {args.doc_path}")
     _print_doc(snap.id, snap.to_dict(), args.format == "json")
 
 
@@ -445,11 +443,12 @@ def cmd_documents_delete(args):
     if not args.yes:
         if not sys.stdin.isatty():
             raise CliError(
-                f"'{args.doc_path}' を削除します。非対話実行では --yes が必要です。"
+                f"About to delete '{args.doc_path}'. --yes is required in "
+                "non-interactive mode."
             )
-        ans = input(f"'{args.doc_path}' を削除しますか? [y/N] ").strip().lower()
+        ans = input(f"Delete '{args.doc_path}'? [y/N] ").strip().lower()
         if ans not in ("y", "yes"):
-            print("中止しました。")
+            print("Aborted.")
             return
     try:
         resolve_document(client, args.doc_path).delete()
@@ -468,13 +467,13 @@ def _parse_where(expr):
     tokens = expr.split(None, 2)
     if len(tokens) != 3:
         raise CliError(
-            f"--where '{expr}' の形式が不正です。'field OP value' で指定してください。"
-            f" 例: --where \"age >= 18\""
+            f"Invalid --where '{expr}'. Use the form 'field OP value'."
+            f" e.g. --where \"age >= 18\""
         )
     field, op, raw_value = tokens
     if op not in WHERE_OPS:
         raise CliError(
-            f"未対応の演算子 '{op}'。対応: {', '.join(sorted(WHERE_OPS))}"
+            f"Unsupported operator '{op}'. Supported: {', '.join(sorted(WHERE_OPS))}"
         )
     try:
         value = json.loads(raw_value)
@@ -528,99 +527,99 @@ def cmd_query(args):
 def build_parser():
     p = argparse.ArgumentParser(
         prog="fs",
-        description="gcloud 風の Firestore 学習用 CLI",
+        description="A gcloud-style CLI for learning Firestore",
     )
-    p.add_argument("--project", help="GCP プロジェクト ID")
-    p.add_argument("--database", help=f"Firestore database ID (既定: {DEFAULT_DATABASE})")
+    p.add_argument("--project", help="GCP project ID")
+    p.add_argument("--database", help=f"Firestore database ID (default: {DEFAULT_DATABASE})")
     sub = p.add_subparsers(dest="noun", required=True)
 
     # config
-    c = sub.add_parser("config", help="設定の表示・変更")
+    c = sub.add_parser("config", help="Show or change configuration")
     csub = c.add_subparsers(dest="verb", required=True)
-    cset = csub.add_parser("set", help="設定値を保存 (project / database)")
+    cset = csub.add_parser("set", help="Save a config value (project / database)")
     cset.add_argument("key", choices=["project", "database"])
     cset.add_argument("value")
     cset.set_defaults(func=cmd_config_set)
-    clist = csub.add_parser("list", help="現在の設定と実効値を表示")
+    clist = csub.add_parser("list", help="Show current config and effective values")
     clist.set_defaults(func=cmd_config_list)
 
     # db
-    d = sub.add_parser("db", help="database 操作 (Admin API)")
+    d = sub.add_parser("db", help="Database operations (Admin API)")
     dsub = d.add_subparsers(dest="verb", required=True)
-    dc = dsub.add_parser("create", help="database を作成")
+    dc = dsub.add_parser("create", help="Create a database")
     dc.add_argument("--database", default=DEFAULT_DATABASE, help="database ID")
-    dc.add_argument("--location", default="nam5", help="ロケーション (既定: nam5)")
+    dc.add_argument("--location", default="nam5", help="location (default: nam5)")
     dc.set_defaults(func=cmd_db_create)
-    dl = dsub.add_parser("list", help="database 一覧")
+    dl = dsub.add_parser("list", help="List databases")
     dl.set_defaults(func=cmd_db_list)
-    dd = dsub.add_parser("describe", help="database 詳細")
+    dd = dsub.add_parser("describe", help="Describe a database")
     dd.add_argument("--database", default=DEFAULT_DATABASE)
     dd.set_defaults(func=cmd_db_describe)
 
     # collections
-    col = sub.add_parser("collections", help="collection の一覧・作成")
+    col = sub.add_parser("collections", help="List or create collections")
     colsub = col.add_subparsers(dest="verb", required=True)
-    cl = colsub.add_parser("list", help="root または document 配下の collection 一覧")
-    cl.add_argument("doc_path", nargs="?", help="例: users/alice")
+    cl = colsub.add_parser("list", help="List collections at root or under a document")
+    cl.add_argument("doc_path", nargs="?", help="e.g. users/alice")
     cl.set_defaults(func=cmd_collections_list)
-    cc = colsub.add_parser("create", help="最初の document を作って collection を生成")
-    cc.add_argument("collection", help="collection パス 例: users")
+    cc = colsub.add_parser("create", help="Create the first document to materialize a collection")
+    cc.add_argument("collection", help="collection path, e.g. users")
     cc.add_argument("--doc-id", required=True, dest="doc_id")
     cc.add_argument("--data")
     cc.add_argument("--data-file", dest="data_file")
     cc.set_defaults(func=cmd_collections_create)
 
     # documents
-    doc = sub.add_parser("documents", help="document の CRUD")
+    doc = sub.add_parser("documents", help="Document CRUD")
     docsub = doc.add_subparsers(dest="verb", required=True)
 
-    dls = docsub.add_parser("list", help="collection 内の document 一覧")
-    dls.add_argument("collection", help="collection パス 例: users")
+    dls = docsub.add_parser("list", help="List documents in a collection")
+    dls.add_argument("collection", help="collection path, e.g. users")
     dls.add_argument("--limit", type=int)
     dls.set_defaults(func=cmd_documents_list)
 
-    dg = docsub.add_parser("get", help="document を取得")
-    dg.add_argument("doc_path", help="document パス 例: users/alice")
+    dg = docsub.add_parser("get", help="Get a document")
+    dg.add_argument("doc_path", help="document path, e.g. users/alice")
     dg.add_argument("--format", choices=["text", "json"], default="text")
     dg.set_defaults(func=cmd_documents_get)
 
-    da = docsub.add_parser("add", help="自動 ID で document を追加")
-    da.add_argument("collection", help="collection パス")
+    da = docsub.add_parser("add", help="Add a document with an auto-generated ID")
+    da.add_argument("collection", help="collection path")
     da.add_argument("--data")
     da.add_argument("--data-file", dest="data_file")
     da.set_defaults(func=cmd_documents_add)
 
-    ds = docsub.add_parser("set", help="document を作成/上書き")
+    ds = docsub.add_parser("set", help="Create or overwrite a document")
     ds.add_argument("doc_path")
     ds.add_argument("--data")
     ds.add_argument("--data-file", dest="data_file")
-    ds.add_argument("--merge", action="store_true", help="既存フィールドを残してマージ")
+    ds.add_argument("--merge", action="store_true", help="Merge, keeping existing fields")
     ds.set_defaults(func=cmd_documents_set)
 
-    du = docsub.add_parser("update", help="既存 document のフィールドを更新")
+    du = docsub.add_parser("update", help="Update fields of an existing document")
     du.add_argument("doc_path")
     du.add_argument("--data")
     du.add_argument("--data-file", dest="data_file")
     du.set_defaults(func=cmd_documents_update)
 
-    dd2 = docsub.add_parser("delete", help="document を削除")
+    dd2 = docsub.add_parser("delete", help="Delete a document")
     dd2.add_argument("doc_path")
-    dd2.add_argument("--yes", action="store_true", help="確認をスキップ")
+    dd2.add_argument("--yes", action="store_true", help="Skip confirmation")
     dd2.set_defaults(func=cmd_documents_delete)
 
     # query
-    q = sub.add_parser("query", help="collection を検索")
-    q.add_argument("collection", help="collection パス")
+    q = sub.add_parser("query", help="Query a collection")
+    q.add_argument("collection", help="collection path")
     q.add_argument("--where", action="append",
-                   help='"field OP value" 例: "age >= 18" (複数指定可)')
+                   help='"field OP value", e.g. "age >= 18" (repeatable)')
     q.add_argument("--order-by", dest="order_by",
-                   help="field[:desc] 例: created:desc")
+                   help="field[:desc], e.g. created:desc")
     q.add_argument("--limit", type=int)
     q.add_argument("--format", choices=["text", "json"], default="text")
     q.set_defaults(func=cmd_query)
 
     # help
-    h = sub.add_parser("help", help="使い方を表示")
+    h = sub.add_parser("help", help="Show usage")
     h.set_defaults(func=lambda a: p.print_help())
 
     return p
@@ -636,10 +635,10 @@ def main(argv=None):
         rc = args.func(args)
         return rc or 0
     except CliError as exc:
-        print(f"エラー: {exc}", file=sys.stderr)
+        print(f"Error: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
-        print("\n中断しました。", file=sys.stderr)
+        print("\nInterrupted.", file=sys.stderr)
         return 130
 
 
