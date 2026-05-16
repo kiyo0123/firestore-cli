@@ -10,7 +10,9 @@ Single external dependency: google-cloud-firestore.
 import argparse
 import json
 import os
+import re
 import sys
+from datetime import datetime, timezone
 
 CONFIG_DIR = os.path.join(
     os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")),
@@ -18,13 +20,21 @@ CONFIG_DIR = os.path.join(
 )
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 
-DEFAULT_DATABASE = "(default)"
+DEFAULT_DATABASE = "default"
 
-WHERE_OPS = {"==", "!=", "<", "<=", ">", ">=", "in", "array-contains"}
+WHERE_OPS = {"==", "!=", "<", "<=", ">", ">=", "in", "not-in", "array-contains", "array-contains-any"}
+_ARRAY_OPS = {"in", "not-in", "array-contains-any"}
 
 
 class CliError(Exception):
     """A user-facing error with a friendly message (no traceback)."""
+
+
+class HelpOnErrorParser(argparse.ArgumentParser):
+    def error(self, message):
+        print(f"error: {message}\n", file=sys.stderr)
+        self.print_help(sys.stderr)
+        sys.exit(2)
 
 
 # --------------------------------------------------------------------------- #
@@ -58,9 +68,7 @@ def get_client(args):
     project = resolve_project(args)
     database = resolve_database(args)
     try:
-        if database and database != DEFAULT_DATABASE:
-            return firestore.Client(project=project, database=database)
-        return firestore.Client(project=project)
+        return firestore.Client(project=project, database=database or DEFAULT_DATABASE)
     except Exception as exc:  # noqa: BLE001
         raise _friendly(exc)
 
@@ -181,7 +189,28 @@ def read_data(args):
         raise CliError(f"--data is not valid JSON: {exc}")
     if not isinstance(value, dict):
         raise CliError("--data must be an object ({...}).")
-    return value
+    return _coerce_types(value)
+
+
+def _coerce_types(obj):
+    """Recursively convert @timestamp / @now special strings to datetime."""
+    if isinstance(obj, dict):
+        return {k: _coerce_types(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_coerce_types(v) for v in obj]
+    if isinstance(obj, str):
+        if obj == "@now":
+            return datetime.now(tz=timezone.utc)
+        if obj.startswith("@timestamp:"):
+            raw_ts = obj[len("@timestamp:"):]
+            dt = _try_parse_datetime(raw_ts)
+            if dt is None:
+                raise CliError(
+                    f"Invalid @timestamp value '{raw_ts}'. "
+                    "Use ISO 8601, e.g. @timestamp:2026-05-15T20:21:42Z"
+                )
+            return dt
+    return obj
 
 
 def _print_doc(doc_id, data, as_json):
@@ -271,28 +300,6 @@ def cmd_config_list(args):
 # Commands: db (Admin API)
 # --------------------------------------------------------------------------- #
 
-def cmd_db_create(args):
-    admin = _require_admin()
-    project = resolve_project(args)
-    database_id = args.database or DEFAULT_DATABASE
-    try:
-        client = admin.FirestoreAdminClient()
-        db = admin.types.Database(
-            type_=admin.types.Database.DatabaseType.FIRESTORE_NATIVE,
-            location_id=args.location,
-        )
-        op = client.create_database(
-            parent=f"projects/{project}",
-            database=db,
-            database_id=database_id,
-        )
-        print(f"Creating... (database_id={database_id}, location={args.location})")
-        result = op.result(timeout=300)
-        print(f"Created database: {result.name}")
-    except Exception as exc:  # noqa: BLE001
-        raise _friendly(exc)
-
-
 def cmd_db_list(args):
     admin = _require_admin()
     project = resolve_project(args)
@@ -352,20 +359,10 @@ def cmd_collections_list(args):
     for cid in ids:
         print(f"  {cid}")
     print(f"\n{len(ids)} items")
-
-
-def cmd_collections_create(args):
-    client = get_client(args)
-    data = read_data(args)
-    try:
-        col = resolve_collection(client, args.collection)
-        col.document(args.doc_id).set(data)
-    except CliError:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        raise _friendly(exc)
-    print(f"Created {args.collection}/{args.doc_id}")
-    print("(In Firestore, a collection is created implicitly when its first document is written)")
+    first = ids[0]
+    print(f"\nTip: To list documents in a collection, run:")
+    print(f"  fs documents list <collection>")
+    print(f"  e.g. fs documents list {first}")
 
 
 # --------------------------------------------------------------------------- #
@@ -382,7 +379,13 @@ def cmd_documents_list(args):
         raise
     except Exception as exc:  # noqa: BLE001
         raise _friendly(exc)
-    _print_table(rows)
+    if args.format == "json":
+        print(json.dumps(
+            [{"id": i, "data": d} for i, d in rows],
+            ensure_ascii=False, indent=2, default=str,
+        ))
+    else:
+        _print_table(rows)
 
 
 def cmd_documents_get(args):
@@ -438,6 +441,21 @@ def cmd_documents_update(args):
     print(f"Updated {args.doc_path}")
 
 
+def cmd_documents_exists(args):
+    client = get_client(args)
+    try:
+        snap = resolve_document(client, args.doc_path).get()
+    except CliError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise _friendly(exc)
+    if snap.exists:
+        print(f"exists: {args.doc_path}")
+    else:
+        print(f"not found: {args.doc_path}")
+        raise SystemExit(1)
+
+
 def cmd_documents_delete(args):
     client = get_client(args)
     if not args.yes:
@@ -457,11 +475,27 @@ def cmd_documents_delete(args):
     except Exception as exc:  # noqa: BLE001
         raise _friendly(exc)
     print(f"Deleted {args.doc_path}")
+    print("Note: subcollections under this document are not deleted.")
 
 
 # --------------------------------------------------------------------------- #
 # Commands: query
 # --------------------------------------------------------------------------- #
+
+_ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2})?(\.\d+)?(Z|[+-]\d{2}:?\d{2})?)?$")
+
+def _try_parse_datetime(s):
+    if not _ISO_RE.match(s):
+        return None
+    # date-only → treat as start of day UTC
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", s):
+        s = s + "T00:00:00+00:00"
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
 
 def _parse_where(expr):
     tokens = expr.split(None, 2)
@@ -478,7 +512,12 @@ def _parse_where(expr):
     try:
         value = json.loads(raw_value)
     except json.JSONDecodeError:
-        value = raw_value  # treat as plain string
+        value = _try_parse_datetime(raw_value) or raw_value
+    if op in _ARRAY_OPS and not isinstance(value, list):
+        raise CliError(
+            f"Operator '{op}' requires a JSON array value. "
+            f'e.g. --where \'{field} {op} ["a","b"]\''
+        )
     return field, op, value
 
 
@@ -525,17 +564,18 @@ def cmd_query(args):
 # --------------------------------------------------------------------------- #
 
 def build_parser():
-    p = argparse.ArgumentParser(
+    p = HelpOnErrorParser(
         prog="fs",
         description="A gcloud-style CLI for learning Firestore",
     )
     p.add_argument("--project", help="GCP project ID")
     p.add_argument("--database", help=f"Firestore database ID (default: {DEFAULT_DATABASE})")
-    sub = p.add_subparsers(dest="noun", required=True)
+    sub = p.add_subparsers(dest="noun", required=True, parser_class=HelpOnErrorParser)
 
     # config
     c = sub.add_parser("config", help="Show or change configuration")
-    csub = c.add_subparsers(dest="verb", required=True)
+    c.set_defaults(func=lambda a: c.print_help())
+    csub = c.add_subparsers(dest="verb", parser_class=HelpOnErrorParser)
     cset = csub.add_parser("set", help="Save a config value (project / database)")
     cset.add_argument("key", choices=["project", "database"])
     cset.add_argument("value")
@@ -545,11 +585,8 @@ def build_parser():
 
     # db
     d = sub.add_parser("db", help="Database operations (Admin API)")
-    dsub = d.add_subparsers(dest="verb", required=True)
-    dc = dsub.add_parser("create", help="Create a database")
-    dc.add_argument("--database", default=DEFAULT_DATABASE, help="database ID")
-    dc.add_argument("--location", default="nam5", help="location (default: nam5)")
-    dc.set_defaults(func=cmd_db_create)
+    d.set_defaults(func=lambda a: d.print_help())
+    dsub = d.add_subparsers(dest="verb", parser_class=HelpOnErrorParser)
     dl = dsub.add_parser("list", help="List databases")
     dl.set_defaults(func=cmd_db_list)
     dd = dsub.add_parser("describe", help="Describe a database")
@@ -557,54 +594,129 @@ def build_parser():
     dd.set_defaults(func=cmd_db_describe)
 
     # collections
-    col = sub.add_parser("collections", help="List or create collections")
-    colsub = col.add_subparsers(dest="verb", required=True)
+    col = sub.add_parser("collections", help="List collections")
+    col.set_defaults(func=lambda a: col.print_help())
+    colsub = col.add_subparsers(dest="verb", parser_class=HelpOnErrorParser)
     cl = colsub.add_parser("list", help="List collections at root or under a document")
     cl.add_argument("doc_path", nargs="?", help="e.g. users/alice")
     cl.set_defaults(func=cmd_collections_list)
-    cc = colsub.add_parser("create", help="Create the first document to materialize a collection")
-    cc.add_argument("collection", help="collection path, e.g. users")
-    cc.add_argument("--doc-id", required=True, dest="doc_id")
-    cc.add_argument("--data")
-    cc.add_argument("--data-file", dest="data_file")
-    cc.set_defaults(func=cmd_collections_create)
 
     # documents
-    doc = sub.add_parser("documents", help="Document CRUD")
-    docsub = doc.add_subparsers(dest="verb", required=True)
+    doc = sub.add_parser(
+        "documents",
+        help="Read and write Firestore documents",
+        description="Read and write Firestore documents using collection/id paths.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    doc.set_defaults(func=lambda a: doc.print_help())
+    docsub = doc.add_subparsers(dest="verb", parser_class=HelpOnErrorParser)
 
-    dls = docsub.add_parser("list", help="List documents in a collection")
+    dls = docsub.add_parser(
+        "list",
+        help="List all documents in a collection",
+        description="Stream all documents in a collection and print them as a table or JSON.",
+        epilog="Examples:\n  fs documents list users\n  fs documents list users --limit 10 --format json",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     dls.add_argument("collection", help="collection path, e.g. users")
-    dls.add_argument("--limit", type=int)
+    dls.add_argument("--limit", type=int, help="Maximum number of documents to return")
+    dls.add_argument("--format", choices=["text", "json"], default="text")
     dls.set_defaults(func=cmd_documents_list)
 
-    dg = docsub.add_parser("get", help="Get a document")
+    dg = docsub.add_parser(
+        "get",
+        help="Fetch a single document by its full path",
+        description="Retrieve one document by its collection/id path. Exits with an error if not found.",
+        epilog="Examples:\n  fs documents get users/alice\n  fs documents get users/alice --format json",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     dg.add_argument("doc_path", help="document path, e.g. users/alice")
     dg.add_argument("--format", choices=["text", "json"], default="text")
     dg.set_defaults(func=cmd_documents_get)
 
-    da = docsub.add_parser("add", help="Add a document with an auto-generated ID")
-    da.add_argument("collection", help="collection path")
-    da.add_argument("--data")
-    da.add_argument("--data-file", dest="data_file")
+    da = docsub.add_parser(
+        "add",
+        help="Write a new document with an auto-generated ID",
+        description="Add a document to a collection. Firestore assigns a random unique ID.",
+        epilog=(
+            "Examples:\n"
+            "  fs documents add users --data '{\"name\":\"alice\"}'\n"
+            "  fs documents add users --data-file user.json\n"
+            "\n"
+            "Firestore type hints in --data values:\n"
+            "  \"@now\"                     current timestamp (Timestamp type)\n"
+            "  \"@timestamp:2026-05-15T...\" specific datetime (Timestamp type)\n"
+            "  e.g. --data '{\"name\":\"alice\",\"createdAt\":\"@now\"}'"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    da.add_argument("collection", help="collection path, e.g. users")
+    da.add_argument("--data", help="JSON object to write, e.g. '{\"name\":\"alice\"}'")
+    da.add_argument("--data-file", dest="data_file", help="Path to a JSON file")
     da.set_defaults(func=cmd_documents_add)
 
-    ds = docsub.add_parser("set", help="Create or overwrite a document")
-    ds.add_argument("doc_path")
-    ds.add_argument("--data")
-    ds.add_argument("--data-file", dest="data_file")
-    ds.add_argument("--merge", action="store_true", help="Merge, keeping existing fields")
+    ds = docsub.add_parser(
+        "set",
+        help="Create or overwrite a document at a specific path",
+        description="Write a document at a given path. Creates it if it does not exist; overwrites it if it does. Use --merge to keep existing fields.",
+        epilog=(
+            "Examples:\n"
+            "  fs documents set users/alice --data '{\"name\":\"alice\"}'\n"
+            "  fs documents set users/alice --data '{\"age\":30}' --merge\n"
+            "\n"
+            "Firestore type hints in --data values:\n"
+            "  \"@now\"                     current timestamp (Timestamp type)\n"
+            "  \"@timestamp:2026-05-15T...\" specific datetime (Timestamp type)\n"
+            "  e.g. --data '{\"name\":\"alice\",\"createdAt\":\"@now\"}'"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    ds.add_argument("doc_path", help="document path, e.g. users/alice")
+    ds.add_argument("--data", help="JSON object to write")
+    ds.add_argument("--data-file", dest="data_file", help="Path to a JSON file")
+    ds.add_argument("--merge", action="store_true", help="Merge into the existing document instead of overwriting")
     ds.set_defaults(func=cmd_documents_set)
 
-    du = docsub.add_parser("update", help="Update fields of an existing document")
-    du.add_argument("doc_path")
-    du.add_argument("--data")
-    du.add_argument("--data-file", dest="data_file")
+    du = docsub.add_parser(
+        "update",
+        help="Patch specific fields without touching other fields",
+        description="Update only the specified fields of an existing document. Fails if the document does not exist.",
+        epilog=(
+            "Examples:\n"
+            "  fs documents update users/alice --data '{\"age\":31}'\n"
+            "  fs documents update users/alice --data '{\"address.city\":\"Tokyo\"}'\n"
+            "\n"
+            "Firestore type hints in --data values:\n"
+            "  \"@now\"                     current timestamp (Timestamp type)\n"
+            "  \"@timestamp:2026-05-15T...\" specific datetime (Timestamp type)\n"
+            "  e.g. --data '{\"updatedAt\":\"@now\"}'"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    du.add_argument("doc_path", help="document path, e.g. users/alice")
+    du.add_argument("--data", help="JSON object with fields to patch")
+    du.add_argument("--data-file", dest="data_file", help="Path to a JSON file")
     du.set_defaults(func=cmd_documents_update)
 
-    dd2 = docsub.add_parser("delete", help="Delete a document")
-    dd2.add_argument("doc_path")
-    dd2.add_argument("--yes", action="store_true", help="Skip confirmation")
+    de = docsub.add_parser(
+        "exists",
+        help="Exit 0 if the document exists, exit 1 if not found",
+        description="Check whether a document exists without fetching its data. Useful in scripts.",
+        epilog="Examples:\n  fs documents exists users/alice\n  fs documents exists users/alice && echo 'found'",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    de.add_argument("doc_path", help="document path, e.g. users/alice")
+    de.set_defaults(func=cmd_documents_exists)
+
+    dd2 = docsub.add_parser(
+        "delete",
+        help="Delete a document (subcollections are NOT removed)",
+        description="Delete a document by path. Subcollections under the document are not affected.",
+        epilog="Examples:\n  fs documents delete users/alice\n  fs documents delete users/alice --yes",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    dd2.add_argument("doc_path", help="document path, e.g. users/alice")
+    dd2.add_argument("--yes", action="store_true", help="Skip the confirmation prompt")
     dd2.set_defaults(func=cmd_documents_delete)
 
     # query
